@@ -1,0 +1,11 @@
+/* globals.css */
+@import "tailwindcss";
+
+:root {
+  --background: hsl(210, 20%, 98%);
+  /* light background */
+  --foreground: hsl(210, 15%, 10%);
+h2{
+  color:hsl(210, 15%, 10%) !important;
+} 
+}
