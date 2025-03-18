@@ -37,7 +37,7 @@ export default function Sidebar() {
             </Link>
           </li>
           <li className="mb-4">
-            <Link href="/api" className="block hover:text-gray-300 hover:cursor-pointer">
+            <Link href="/api-key" className="block hover:text-gray-300 hover:cursor-pointer">
               🔑 API Key
             </Link>
           </li>
