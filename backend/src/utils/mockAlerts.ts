@@ -2,6 +2,7 @@ import { getUSDMClient } from "../utils/websocketManager";
 import { getCredentials } from "../models/credentials";
 import { AlertPayload } from "./tradeManager";
 import { saveTrade } from "../models/trades";
+import { decrementTradeCount, incrementTradeCount } from "../models/settings";
 
 interface MockTrade {
   symbol: string;
@@ -17,6 +18,13 @@ interface MockTrade {
 const mockTrades: { [symbol: string]: NodeJS.Timeout } = {};
 
 export async function executeMockTrade(alert: AlertPayload): Promise<void> {
+    // NEW GUARD
+    if (mockTrades[alert.symbol]) {
+      console.log(`⏭️ Mock trade already running for ${alert.symbol}, skipping new signal`);
+      return;
+    }
+
+    
   const creds = await getCredentials();
   if (!creds.length) {
     console.error("No credentials available for mock trade");
@@ -49,6 +57,7 @@ export async function executeMockTrade(alert: AlertPayload): Promise<void> {
       trade_amount,
       startTime: Date.now(),
     };
+    await incrementTradeCount();
 
     console.log(`🟢 Simulating trade for ${alert.symbol}: Entry @ ${entry_price}, TP @ ${alert.takeProfit}, SL @ ${alert.stopLoss}`);
 
@@ -107,4 +116,6 @@ async function finalizeMockTrade(trade: MockTrade, exitReason: "TP" | "SL", exit
     time: Date.now(), // Mock timestamp
     extra_info: `Mock trade exited via ${exitReason}`, // Log why trade closed
   });
+  decrementTradeCount();
+  
 }
