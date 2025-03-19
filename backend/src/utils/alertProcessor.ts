@@ -17,6 +17,7 @@ export async function processAlert(alertData: any): Promise<void> {
     console.log("🟠 Test mode active: Simulating trade");
     await executeMockTrade(payload);
   } else {
+    console.log("Payload received:", payload)
     await executeAlertTrade(payload);
   }
 }
