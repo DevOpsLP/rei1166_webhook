@@ -1,9 +1,8 @@
+import axios from 'axios';
 import { 
   USDMClient, 
   NewFuturesOrderParams, 
   NewOrderResult, 
-  SetLeverageParams, 
-  SetLeverageResult 
 } from 'binance';
 
 import { getCredentials } from '../models/credentials';
@@ -19,19 +18,24 @@ export interface AlertPayload {
   trailOffset?: number;
 }
 
-async function getSymbolPrecision(client: USDMClient, symbol: string) {
+// ✅ Fetch exchange info directly via Axios
+async function getSymbolPrecision(symbol: string) {
   try {
-    const exchangeInfo = await client.getExchangeInfo();
-    const symbolInfo = exchangeInfo.symbols.find((s: any) => s.symbol === symbol);
+    const { data } = await axios.get("https://fapi.binance.com/fapi/v1/exchangeInfo");
+    const symbolInfo = data.symbols.find((s: any) => s.symbol === symbol);
 
     if (!symbolInfo) throw new Error(`Symbol ${symbol} not found in exchange info`);
 
+    // Extract relevant filters
+    const lotSizeFilter = symbolInfo.filters.find((f: any) => f.filterType === "LOT_SIZE");
+    const priceFilter = symbolInfo.filters.find((f: any) => f.filterType === "PRICE_FILTER");
+
     return {
-      pricePrecision: symbolInfo.pricePrecision, // Number of decimals allowed for price
-      quantityPrecision: symbolInfo.quantityPrecision, // Number of decimals allowed for quantity
-      minQty: parseFloat((symbolInfo.filters.find((f: any) => f.filterType === "LOT_SIZE") as any)?.minQty),
-      stepSize: parseFloat((symbolInfo.filters.find((f: any) => f.filterType === "LOT_SIZE") as any)?.stepSize),
-      tickSize: parseFloat((symbolInfo.filters.find((f: any) => f.filterType === "PRICE_FILTER") as any)?.tickSize),
+      pricePrecision: symbolInfo.pricePrecision, 
+      quantityPrecision: symbolInfo.quantityPrecision, 
+      minQty: parseFloat(lotSizeFilter?.minQty || "0.001"),
+      stepSize: parseFloat(lotSizeFilter?.stepSize || "0.001"),
+      tickSize: parseFloat(priceFilter?.tickSize || "0.01"),
     };
   } catch (error) {
     console.error("Error fetching symbol precision:", error);
@@ -39,10 +43,18 @@ async function getSymbolPrecision(client: USDMClient, symbol: string) {
   }
 }
 
-function roundToStepSize(value: number, stepSize: number): number {
-  return Math.floor(value / stepSize) * stepSize;
+// ✅ Helper function to round/truncate values correctly
+function getDecimalPlaces(value: string | number): number {
+  const strValue = value.toString();
+  return strValue.includes('.') ? strValue.split('.')[1].length : 0;
 }
 
+function roundToStepSize(value: number, stepSize: number): number {
+  const decimals = getDecimalPlaces(stepSize);
+  return parseFloat(value.toFixed(decimals));
+}
+
+// ✅ Main trading function
 export async function executeAlertTrade(alert: AlertPayload): Promise<void> {
   const creds = await getCredentials();
   if (!creds.length) {
@@ -55,60 +67,26 @@ export async function executeAlertTrade(alert: AlertPayload): Promise<void> {
     api_secret: credential.api_secret,
     beautifyResponses: true,
   });
-  // Check for open positions for the symbol
-  try {
-    const positions = await client.getPositionsV3();
-    const existingPosition = positions.find((p: any) => p.symbol === alert.symbol && parseFloat(p.positionAmt) !== 0);
 
-    if (existingPosition) {
-      console.log(`⚠️ Open position detected for ${alert.symbol}, skipping trade execution.`);
-      return;
-    }
-  } catch (error) {
-    console.error(`❌ Failed to fetch open positions:`, error);
-    return;
-  }
-  // Fetch leverage from credentials
-  const leverage = credential.leverage;
-  if (!leverage || leverage <= 0) {
-    throw new Error('Invalid leverage value');
-  }
+  // ✅ Fetch symbol-specific trading rules using Axios
+  const {stepSize, tickSize } = await getSymbolPrecision(alert.symbol);
 
-  try {
-    // Set leverage for the symbol
-    const leverageParams: SetLeverageParams = {
-      symbol: alert.symbol,
-      leverage: leverage,
-    };
-
-    const leverageResult: SetLeverageResult = await client.setLeverage(leverageParams);
-    console.log(`✅ Leverage set to ${leverage}x for ${alert.symbol}`, leverageResult);
-  } catch (error) {
-    console.error(`❌ Failed to set leverage for ${alert.symbol}:`, error);
-    return;
-  }
-
-  await incrementTradeCount();
-
-  // Fetch precision details for symbol
-  const { pricePrecision, quantityPrecision, stepSize, tickSize } = await getSymbolPrecision(client, alert.symbol);
-
-  // Fetch the latest price
+  // ✅ Fetch latest market price
   const ticker = await client.getSymbolPriceTicker({ symbol: alert.symbol });
   const priceData = Array.isArray(ticker) ? ticker[0] : ticker;
   const lastPrice = parseFloat(priceData.price.toString());
   if (!lastPrice) throw new Error('No price returned for symbol');
 
-  // Calculate order quantity: (balance * leverage) / price
-  const rawQuantity = (credential.trade_amount * leverage) / lastPrice;
-  const tradeQuantity = roundToStepSize(parseFloat(rawQuantity.toFixed(quantityPrecision)), stepSize);
+  // ✅ Calculate order quantity: (balance * leverage) / price
+  const rawQuantity = (credential.trade_amount * credential.leverage) / lastPrice;
+  const tradeQuantity = roundToStepSize(rawQuantity, stepSize);
 
-  // Ensure the price is rounded to the correct tick size
-  const adjustedPrice = parseFloat(lastPrice.toFixed(pricePrecision));
+  // ✅ Ensure the price is rounded to the correct tick size
+  const adjustedPrice = roundToStepSize(lastPrice, tickSize);
 
   console.log(`Placing MARKET ORDER for ${tradeQuantity} ${alert.symbol} at price ${adjustedPrice}`);
 
-  // Place market order
+  // ✅ Place market order
   const marketOrderRequest: NewFuturesOrderParams = {
     symbol: alert.symbol,
     quantity: tradeQuantity,
@@ -120,49 +98,49 @@ export async function executeAlertTrade(alert: AlertPayload): Promise<void> {
     const marketOrderResult = (await client.submitNewOrder(marketOrderRequest)) as NewOrderResult;
     console.log(`✅ Market order executed:`, JSON.stringify(marketOrderResult, null, 2));
 
-    // Determine opposite side for stop loss and take profit
+    // ✅ Determine opposite side for SL/TP
     const oppositeSide = alert.side === "BUY" ? "SELL" : "BUY";
 
-    // Place Stop Loss Order (STOP_MARKET)
+    // ✅ Place Stop Loss Order (STOP_MARKET)
+    const stopLossPrice = roundToStepSize(alert.stopLoss, tickSize);
     const slOrderRequest: NewFuturesOrderParams = {
       symbol: alert.symbol,
       quantity: tradeQuantity,
       side: oppositeSide,
       type: 'STOP_MARKET',
-      stopPrice: Number(alert.stopLoss.toFixed(tickSize)),
+      stopPrice: stopLossPrice,
       reduceOnly: 'true',
     };
-
     await client.submitNewOrder(slOrderRequest);
-    console.log(`✅ Stop Loss order placed at ${Number(alert.stopLoss.toFixed(tickSize))}`);
+    console.log(`✅ Stop Loss order placed at ${stopLossPrice}`);
 
-    // If trailingStop is enabled, place a trailing stop order instead of take profit
+    // ✅ If trailingStop is enabled, place trailing stop order
     if (alert.trailingStop && alert.trailOffset && alert.trailPrice) {
+      const trailingStopPrice = roundToStepSize(alert.trailPrice, tickSize);
       const trailingStopOrderRequest: NewFuturesOrderParams = {
         symbol: alert.symbol,
         quantity: tradeQuantity,
         side: oppositeSide,
         type: 'TRAILING_STOP_MARKET',
-        callbackRate: Number(alert.trailOffset),
-        activationPrice: Number(alert.trailPrice.toFixed(tickSize)),
+        callbackRate: alert.trailOffset,
+        activationPrice: trailingStopPrice,
         reduceOnly: 'true',
       };
-
       await client.submitNewOrder(trailingStopOrderRequest);
-      console.log(`✅ Trailing Stop order placed with offset ${alert.trailOffset} and activation price ${alert.trailPrice ?? 'auto'}`);
+      console.log(`✅ Trailing Stop order placed with offset ${alert.trailOffset} and activation price ${trailingStopPrice}`);
     } else {
-      // Place Take Profit Order (TAKE_PROFIT_MARKET)
+      // ✅ Place Take Profit Order (TAKE_PROFIT_MARKET)
+      const takeProfitPrice = roundToStepSize(alert.takeProfit, tickSize);
       const tpOrderRequest: NewFuturesOrderParams = {
         symbol: alert.symbol,
         quantity: tradeQuantity,
         side: oppositeSide,
         type: 'TAKE_PROFIT_MARKET',
-        stopPrice: Number(alert.takeProfit.toFixed(tickSize)),
+        stopPrice: takeProfitPrice,
         reduceOnly: 'true',
       };
-
       await client.submitNewOrder(tpOrderRequest);
-      console.log(`✅ Take Profit order placed at ${(alert.takeProfit.toFixed(tickSize))}`);
+      console.log(`✅ Take Profit order placed at ${takeProfitPrice}`);
     }
 
     console.log(`✅ Trade setup complete: Market ${alert.side} + SL + ${alert.trailingStop ? 'Trailing Stop' : 'TP'}`);
