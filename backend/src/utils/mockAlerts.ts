@@ -18,74 +18,82 @@ interface MockTrade {
 const mockTrades: { [symbol: string]: NodeJS.Timeout } = {};
 
 export async function executeMockTrade(alert: AlertPayload): Promise<void> {
-    // NEW GUARD
-    if (mockTrades[alert.symbol]) {
+  // 🔹 Add a temporary lock
+  if (mockTrades[alert.symbol]) {
       console.log(`⏭️ Mock trade already running for ${alert.symbol}, skipping new signal`);
       return;
-    }
-
-    
-  const creds = await getCredentials();
-  if (!creds.length) {
-    console.error("No credentials available for mock trade");
-    return;
   }
-
-  const credential = creds[0];
-  const client = getUSDMClient();
-  if (!client) {
-    console.error("USDMClient is not initialized");
-    return;
-  }
+  
+  // 🔹 Lock the trade immediately
+  mockTrades[alert.symbol] = setTimeout(() => {}, 0);
 
   try {
-    // Fetch the latest price immediately
-    const ticker = await client.getSymbolPriceTicker({ symbol: alert.symbol });
-    const entry_price = parseFloat(Array.isArray(ticker) ? ticker[0].price.toString() : ticker.price.toString());
-    if (!entry_price) throw new Error("No price returned for symbol");
-
-    const leverage = credential.leverage;
-    const trade_amount = (credential.trade_amount * leverage) / entry_price;
-
-    const mockTrade: MockTrade = {
-      symbol: alert.symbol,
-      entry_price,
-      side: alert.side,
-      takeProfit: alert.takeProfit,
-      stopLoss: alert.stopLoss,
-      leverage,
-      trade_amount,
-      startTime: Date.now(),
-    };
-    await incrementTradeCount();
-
-    console.log(`🟢 Simulating trade for ${alert.symbol}: Entry @ ${entry_price}, TP @ ${alert.takeProfit}, SL @ ${alert.stopLoss}`);
-
-    // Monitor price every 3 minutes
-    mockTrades[alert.symbol] = setInterval(async () => {
-      try {
-        const ticker = await client.getSymbolPriceTicker({ symbol: alert.symbol });
-        const currentPrice = parseFloat(Array.isArray(ticker) ? ticker[0].price.toString() : ticker.price.toString());
-        if (!currentPrice) return;
-
-        if ((mockTrade.side === "BUY" && currentPrice >= mockTrade.takeProfit) || 
-            (mockTrade.side === "SELL" && currentPrice <= mockTrade.takeProfit)) {
-          console.log(`✅ Mock trade for ${alert.symbol} hit Take Profit @ ${currentPrice}`);
-          await finalizeMockTrade(mockTrade, "TP", currentPrice);
-        }
-
-        if ((mockTrade.side === "BUY" && currentPrice <= mockTrade.stopLoss) || 
-            (mockTrade.side === "SELL" && currentPrice >= mockTrade.stopLoss)) {
-          console.log(`❌ Mock trade for ${alert.symbol} hit Stop Loss @ ${currentPrice}`);
-          await finalizeMockTrade(mockTrade, "SL", currentPrice);
-        }
-      } catch (err) {
-        console.error(`⚠️ Error fetching price for ${alert.symbol}:`, err);
+      const creds = await getCredentials();
+      if (!creds.length) {
+          console.error("No credentials available for mock trade");
+          delete mockTrades[alert.symbol]; // Remove lock on failure
+          return;
       }
-    }, 3 * 60 * 1000); // 3 minutes interval
+
+      const client = getUSDMClient();
+      if (!client) {
+          console.error("USDMClient is not initialized");
+          delete mockTrades[alert.symbol]; // Remove lock on failure
+          return;
+      }
+
+      const ticker = await client.getSymbolPriceTicker({ symbol: alert.symbol });
+      const entry_price = parseFloat(Array.isArray(ticker) ? ticker[0].price.toString() : ticker.price.toString());
+      if (!entry_price) {
+          console.error("No price returned for symbol");
+          delete mockTrades[alert.symbol]; // Remove lock on failure
+          return;
+      }
+
+      const leverage = creds[0].leverage;
+      const trade_amount = (creds[0].trade_amount * leverage) / entry_price;
+
+      const mockTrade: MockTrade = {
+          symbol: alert.symbol,
+          entry_price,
+          side: alert.side,
+          takeProfit: alert.takeProfit,
+          stopLoss: alert.stopLoss,
+          leverage,
+          trade_amount,
+          startTime: Date.now(),
+      };
+
+      await incrementTradeCount();
+
+      console.log(`🟢 Simulating trade for ${alert.symbol}: Entry @ ${entry_price}, TP @ ${alert.takeProfit}, SL @ ${alert.stopLoss}`);
+
+      // 🔹 Store actual monitoring interval
+      mockTrades[alert.symbol] = setInterval(async () => {
+          try {
+              const ticker = await client.getSymbolPriceTicker({ symbol: alert.symbol });
+              const currentPrice = parseFloat(Array.isArray(ticker) ? ticker[0].price.toString() : ticker.price.toString());
+              if (!currentPrice) return;
+
+              if ((mockTrade.side === "BUY" && currentPrice >= mockTrade.takeProfit) ||
+                  (mockTrade.side === "SELL" && currentPrice <= mockTrade.takeProfit)) {
+                  console.log(`✅ Mock trade for ${alert.symbol} hit Take Profit @ ${currentPrice}`);
+                  await finalizeMockTrade(mockTrade, "TP", currentPrice);
+              }
+
+              if ((mockTrade.side === "BUY" && currentPrice <= mockTrade.stopLoss) ||
+                  (mockTrade.side === "SELL" && currentPrice >= mockTrade.stopLoss)) {
+                  console.log(`❌ Mock trade for ${alert.symbol} hit Stop Loss @ ${currentPrice}`);
+                  await finalizeMockTrade(mockTrade, "SL", currentPrice);
+              }
+          } catch (err) {
+              console.error(`⚠️ Error fetching price for ${alert.symbol}:`, err);
+          }
+      }, 3 * 60 * 1000); // 3-minute interval
 
   } catch (error) {
-    console.error("❌ Error in mock trade execution:", error);
+      console.error("❌ Error in mock trade execution:", error);
+      delete mockTrades[alert.symbol]; // Ensure cleanup on failure
   }
 }
 
